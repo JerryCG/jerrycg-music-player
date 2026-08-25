@@ -1,6 +1,6 @@
 {
-    "total":  868,
-    "ok":  816,
+    "total":  869,
+    "ok":  817,
     "skip_existing":  6,
     "miss":  52,
     "by_source":  {
@@ -7764,7 +7764,16 @@
                       "status":  "ok",
                       "source":  "lrclib",
                       "meta":  "lrclib:17221"
+                  },
+                  {
+                      "id":  878,
+                      "name":  "爱上张无忌",
+                      "artist":  "毛阿敏",
+                      "file":  "aishangzhangwuji_maoamin.lrc",
+                      "status":  "ok",
+                      "source":  "manual",
+                      "meta":  "yymp3-timed"
                   }
               ],
-    "updated_at":  "2026-08-15T00:53:31"
+    "updated_at":  "2026-08-25T11:17:51"
 }

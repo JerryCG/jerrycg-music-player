@@ -6040,6 +6040,13 @@ function getMusics() {
             src:"https://github.com/JerryCG/music-collection-db/blob/main/music/xiaoyu_zhangzhenyue.mp3?raw=true",
             name:"小宇",
             artist:"张震岳"
+        },
+        {
+            id:878,
+            genre:"Chinese Pop",
+            src:"https://github.com/JerryCG/music-collection-db/blob/main/music/aishangzhangwuji_maoamin.mp3?raw=true",
+            name:"爱上张无忌",
+            artist:"毛阿敏"
         }
     ]
 }
