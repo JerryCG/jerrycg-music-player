@@ -1,9 +1,17 @@
 /**
  * Media Session API — lock screen / notification / headset / car media keys
+ *
+ * Artwork strategy (mobile lock-screen / notification):
+ *  1) Explicit cover URL from disc-art (iTunes) when ready
+ *  2) Cached cover from localStorage
+ *  3) Procedural disc data-URL (unique per track) while waiting for iTunes
+ *  4) App logo only as last-resort fallback
  */
 (function () {
   let currentLyric = '';
-  let artwork = [];
+  let logoArtwork = [];
+  /** @type {Record<string, string>} trackId → cover or data URL for this session */
+  let coverByTrack = {};
 
   function init() {
     if (!('mediaSession' in navigator)) {
@@ -11,13 +19,13 @@
       return;
     }
 
-    // Prefer high-res logo for lock screen artwork (works on GitHub Pages subpaths)
+    // Logo fallback for lock screen (works on GitHub Pages subpaths)
     let path = window.location.pathname;
     if (!path.endsWith('/')) path = path.replace(/\/[^/]*$/, '/');
     const base = window.location.origin + path;
     const logo = new URL('logo-web.png', base).href;
     const logoSm = new URL('logo-web-removebg.png', base).href;
-    artwork = [
+    logoArtwork = [
       { src: logoSm, sizes: '192x192', type: 'image/png' },
       { src: logo, sizes: '512x512', type: 'image/png' },
     ];
@@ -83,30 +91,62 @@
     }
     installHandlers();
 
-    // Android may drop handlers after long background; re-install on foreground
+    // Android may drop handlers / metadata after long background
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden) installHandlers();
+      if (document.hidden) return;
+      installHandlers();
+      try {
+        var t = window.MPPlayer && MPPlayer.getCurrentTrack && MPPlayer.getCurrentTrack();
+        if (t) updateMetadata(t);
+      } catch (_) {}
     });
   }
 
-  function updateMetadata(track) {
+  function mimeForSrc(src) {
+    if (!src) return 'image/jpeg';
+    if (src.indexOf('data:image/png') === 0 || /\.png(\?|$)/i.test(src)) return 'image/png';
+    if (src.indexOf('data:image/webp') === 0 || /\.webp(\?|$)/i.test(src)) return 'image/webp';
+    return 'image/jpeg';
+  }
+
+  function resolveCoverUrl(track, coverUrl) {
+    var id = String(track.id);
+    if (coverUrl) {
+      coverByTrack[id] = coverUrl;
+      return coverUrl;
+    }
+    if (coverByTrack[id]) return coverByTrack[id];
+    try {
+      var map = MPUtils.storageGet('mp-disc-covers-v1', {}) || {};
+      if (map[id]) {
+        coverByTrack[id] = map[id];
+        return map[id];
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /**
+   * @param {object} track
+   * @param {string} [coverUrl] https cover or data: URL — upgrades lock-screen art
+   */
+  function updateMetadata(track, coverUrl) {
     if (!('mediaSession' in navigator) || !track) return;
     try {
       const albumParts = [track.genre || '果子狸のMusic Player'];
       if (currentLyric) albumParts.push(currentLyric);
 
-      // Prefer disc cover in cache when available (same key as disc-art)
-      var art = artwork;
-      try {
-        var map = MPUtils.storageGet('mp-disc-covers-v1', {}) || {};
-        var cover = map[String(track.id)];
-        if (cover) {
-          art = [
-            { src: cover, sizes: '300x300', type: 'image/jpeg' },
-            { src: cover, sizes: '512x512', type: 'image/jpeg' },
-          ].concat(artwork);
-        }
-      } catch (_) {}
+      var cover = resolveCoverUrl(track, coverUrl);
+      var art = logoArtwork;
+      if (cover) {
+        var mime = mimeForSrc(cover);
+        // Song art first — Android often picks the first entry
+        art = [
+          { src: cover, sizes: '512x512', type: mime },
+          { src: cover, sizes: '300x300', type: mime },
+          { src: cover, sizes: '192x192', type: mime },
+        ].concat(logoArtwork);
+      }
 
       navigator.mediaSession.metadata = new MediaMetadata({
         title: track.name,
@@ -117,6 +157,12 @@
     } catch (e) {
       console.warn('MediaMetadata failed', e);
     }
+  }
+
+  /** Called by disc-art when a cover (or procedural snapshot) is ready. */
+  function setArtwork(track, coverUrl) {
+    if (!track || !coverUrl) return;
+    updateMetadata(track, coverUrl);
   }
 
   function updatePlaybackState(playing) {
@@ -149,6 +195,7 @@
   window.MPMediaSession = {
     init,
     updateMetadata,
+    setArtwork,
     updatePlaybackState,
     updatePosition,
     setLyricLine,

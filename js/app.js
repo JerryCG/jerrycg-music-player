@@ -293,9 +293,10 @@
 
     MPPlayer.on('trackchange', (track) => {
       MPLyrics.loadForTrack(track);
+      // Disc art first: pushes procedural (then iTunes) artwork into Media Session
+      if (window.MPDiscArt) MPDiscArt.update(track);
       MPMediaSession.updateMetadata(track);
       MPMediaSession.setLyricLine('');
-      if (window.MPDiscArt) MPDiscArt.update(track);
       updatePlayPauseUI(false);
       // Update URL without reload
       try {

@@ -15,6 +15,8 @@
   let watermark = null;
   let labelEl = null;
   let loadToken = 0;
+  /** @type {object|null} track currently shown on the disc */
+  let activeTrack = null;
 
   const GENRE_THEMES = {
     'Chinese Ancientry': {
@@ -318,12 +320,32 @@
     MPUtils.storageSet(CACHE_KEY, map);
   }
 
+  function pushMediaArtwork(url) {
+    if (!url || !activeTrack) return;
+    if (window.MPMediaSession && typeof MPMediaSession.setArtwork === 'function') {
+      try {
+        MPMediaSession.setArtwork(activeTrack, url);
+      } catch (_) {}
+    }
+  }
+
+  function proceduralDataUrl() {
+    if (!canvas) return null;
+    try {
+      return canvas.toDataURL('image/jpeg', 0.9);
+    } catch (_) {
+      return null;
+    }
+  }
+
   function showCover(url) {
     if (!coverImg || !url) return;
     coverImg.onload = function () {
       coverImg.hidden = false;
       if (canvas) canvas.classList.add('is-covered');
       if (labelEl) labelEl.classList.add('has-cover');
+      // Upgrade lock-screen / notification art to the real cover
+      pushMediaArtwork(url);
     };
     coverImg.onerror = function () {
       hideCover();
@@ -348,11 +370,19 @@
       .trim();
   }
 
+  function upscaleItunesArt(url) {
+    if (!url) return url;
+    return String(url)
+      .replace(/100x100bb/g, '600x600bb')
+      .replace(/60x60bb/g, '600x600bb')
+      .replace(/300x300bb/g, '600x600bb');
+  }
+
   async function fetchCoverUrl(track, signal) {
     var cache = readCache();
     var key = String(track.id);
     if (cache[key] === null) return null; // remembered miss
-    if (cache[key]) return cache[key];
+    if (cache[key]) return upscaleItunesArt(cache[key]);
 
     var term = cleanQueryPart(track.artist) + ' ' + cleanQueryPart(track.name);
     if (term.length < 2) return null;
@@ -383,7 +413,7 @@
     var best = pickBestCover(results, track);
     var art = best && (best.artworkUrl100 || best.artworkUrl60);
     if (art) {
-      art = art.replace(/100x100bb/, '300x300bb').replace(/60x60bb/, '300x300bb');
+      art = upscaleItunesArt(art);
       cache[key] = art;
       writeCache(cache);
       return art;
@@ -420,16 +450,22 @@
 
   function update(track) {
     if (!track) {
+      activeTrack = null;
       drawProcedural({ name: '果', artist: '', genre: 'Light Music', id: 0 });
       hideCover();
       return;
     }
 
+    activeTrack = track;
     var token = ++loadToken;
     hideCover();
     drawProcedural(track);
 
     if (watermark) watermark.hidden = false;
+
+    // Immediate unique art for Media Session (don't leave the app logo stuck)
+    var snap = proceduralDataUrl();
+    if (snap) pushMediaArtwork(snap);
 
     // Progressive enhancement: real cover when available
     var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
