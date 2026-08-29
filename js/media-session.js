@@ -1,17 +1,19 @@
 /**
  * Media Session API — lock screen / notification / headset / car media keys
  *
- * Artwork strategy (mobile lock-screen / notification):
- *  1) Explicit cover URL from disc-art (iTunes) when ready
- *  2) Cached cover from localStorage
- *  3) Procedural disc data-URL (unique per track) while waiting for iTunes
- *  4) App logo only as last-resort fallback
+ * Artwork (Android/Chrome):
+ *  - Target size is ~512×512; tiny images are often ignored → falls back to app icon.
+ *  - Prefer same-origin blob: JPEG URLs materialized from covers / procedural art.
+ *  - When song art exists, do NOT also list the app logo (Android may pick the logo).
  */
 (function () {
   let currentLyric = '';
   let logoArtwork = [];
-  /** @type {Record<string, string>} trackId → cover or data URL for this session */
-  let coverByTrack = {};
+  /** @type {Record<string, string>} raw source (https / data) preferred for a track */
+  let coverSourceByTrack = {};
+  /** @type {Record<string, string>} materialized blob: URLs for Media Session */
+  let blobUrlByTrack = {};
+  let artworkJob = 0;
 
   function init() {
     if (!('mediaSession' in navigator)) {
@@ -19,7 +21,6 @@
       return;
     }
 
-    // Logo fallback for lock screen (works on GitHub Pages subpaths)
     let path = window.location.pathname;
     if (!path.endsWith('/')) path = path.replace(/\/[^/]*$/, '/');
     const base = window.location.origin + path;
@@ -30,8 +31,6 @@
       { src: logo, sizes: '512x512', type: 'image/png' },
     ];
 
-    // Wrap handlers so OS lock-screen / headset events keep the continuous
-    // playback chain (important for Android after background track changes).
     const handlers = {
       play: () => {
         try {
@@ -48,7 +47,6 @@
           MPPlayer.previous();
         } catch (_) {}
       },
-      // fromEnded-style advance: always autoplay next with intent
       nexttrack: () => {
         try {
           MPPlayer.next(true);
@@ -85,13 +83,12 @@
         try {
           navigator.mediaSession.setActionHandler(action, handler);
         } catch (e) {
-          // Some actions unsupported on this platform
+          /* unsupported action */
         }
       }
     }
     installHandlers();
 
-    // Android may drop handlers / metadata after long background
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) return;
       installHandlers();
@@ -102,64 +99,212 @@
     });
   }
 
-  function mimeForSrc(src) {
-    if (!src) return 'image/jpeg';
-    if (src.indexOf('data:image/png') === 0 || /\.png(\?|$)/i.test(src)) return 'image/png';
-    if (src.indexOf('data:image/webp') === 0 || /\.webp(\?|$)/i.test(src)) return 'image/webp';
-    return 'image/jpeg';
+  function revokeBlob(id) {
+    var u = blobUrlByTrack[id];
+    if (!u) return;
+    try {
+      URL.revokeObjectURL(u);
+    } catch (_) {}
+    delete blobUrlByTrack[id];
   }
 
-  function resolveCoverUrl(track, coverUrl) {
+  function loadImage(src, cors) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      if (cors) img.crossOrigin = 'anonymous';
+      img.onload = function () {
+        resolve(img);
+      };
+      img.onerror = function () {
+        reject(new Error('image load failed'));
+      };
+      img.src = src;
+    });
+  }
+
+  function canvasToJpegBlobUrl(canvas) {
+    return new Promise(function (resolve, reject) {
+      if (typeof canvas.toBlob === 'function') {
+        canvas.toBlob(
+          function (blob) {
+            if (!blob) {
+              reject(new Error('toBlob empty'));
+              return;
+            }
+            resolve(URL.createObjectURL(blob));
+          },
+          'image/jpeg',
+          0.92
+        );
+      } else {
+        try {
+          resolve(canvas.toDataURL('image/jpeg', 0.92));
+        } catch (e) {
+          reject(e);
+        }
+      }
+    });
+  }
+
+  /** Cover-fit into a 512×512 JPEG blob URL (Android notification target size). */
+  function toSquareArtworkUrl(source) {
+    var size = 512;
+    var c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = '#1a1408';
+    ctx.fillRect(0, 0, size, size);
+    var sw = source.naturalWidth || source.width || size;
+    var sh = source.naturalHeight || source.height || size;
+    if (!sw || !sh) return canvasToJpegBlobUrl(c);
+    var scale = Math.max(size / sw, size / sh);
+    var dw = sw * scale;
+    var dh = sh * scale;
+    ctx.drawImage(source, (size - dw) / 2, (size - dh) / 2, dw, dh);
+    return canvasToJpegBlobUrl(c);
+  }
+
+  /**
+   * Turn https / data / blob into a same-origin-ish JPEG blob URL for Media Session.
+   * @param {string} src
+   * @returns {Promise<string>}
+   */
+  function materializeArtwork(src) {
+    if (!src) return Promise.reject(new Error('no src'));
+
+    // Already a JPEG/PNG data URL — decode then resize
+    if (src.indexOf('data:') === 0) {
+      return loadImage(src, false).then(toSquareArtworkUrl);
+    }
+
+    // Fetch with CORS (iTunes mzstatic sends ACAO: *)
+    return fetch(src, { mode: 'cors', credentials: 'omit', cache: 'force-cache' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('art fetch ' + res.status);
+        return res.blob();
+      })
+      .then(function (blob) {
+        if (typeof createImageBitmap === 'function') {
+          return createImageBitmap(blob).then(toSquareArtworkUrl);
+        }
+        var obj = URL.createObjectURL(blob);
+        return loadImage(obj, false)
+          .then(toSquareArtworkUrl)
+          .then(function (out) {
+            try {
+              URL.revokeObjectURL(obj);
+            } catch (_) {}
+            return out;
+          });
+      })
+      .catch(function () {
+        // Fallback: <img crossOrigin>
+        return loadImage(src, true).then(toSquareArtworkUrl);
+      });
+  }
+
+  function resolveSource(track, coverUrl) {
     var id = String(track.id);
     if (coverUrl) {
-      coverByTrack[id] = coverUrl;
+      coverSourceByTrack[id] = coverUrl;
       return coverUrl;
     }
-    if (coverByTrack[id]) return coverByTrack[id];
+    if (coverSourceByTrack[id]) return coverSourceByTrack[id];
     try {
       var map = MPUtils.storageGet('mp-disc-covers-v1', {}) || {};
       if (map[id]) {
-        coverByTrack[id] = map[id];
-        return map[id];
+        var u = String(map[id])
+          .replace(/100x100bb/g, '600x600bb')
+          .replace(/60x60bb/g, '600x600bb')
+          .replace(/300x300bb/g, '600x600bb');
+        coverSourceByTrack[id] = u;
+        return u;
       }
     } catch (_) {}
     return null;
   }
 
-  /**
-   * @param {object} track
-   * @param {string} [coverUrl] https cover or data: URL — upgrades lock-screen art
-   */
-  function updateMetadata(track, coverUrl) {
+  function applyMetadata(track, artEntries) {
     if (!('mediaSession' in navigator) || !track) return;
     try {
       const albumParts = [track.genre || '果子狸のMusic Player'];
       if (currentLyric) albumParts.push(currentLyric);
-
-      var cover = resolveCoverUrl(track, coverUrl);
-      var art = logoArtwork;
-      if (cover) {
-        var mime = mimeForSrc(cover);
-        // Song art first — Android often picks the first entry
-        art = [
-          { src: cover, sizes: '512x512', type: mime },
-          { src: cover, sizes: '300x300', type: mime },
-          { src: cover, sizes: '192x192', type: mime },
-        ].concat(logoArtwork);
-      }
-
       navigator.mediaSession.metadata = new MediaMetadata({
         title: track.name,
         artist: track.artist,
         album: albumParts.join(' · '),
-        artwork: art,
+        artwork: artEntries && artEntries.length ? artEntries : logoArtwork,
       });
     } catch (e) {
       console.warn('MediaMetadata failed', e);
     }
   }
 
-  /** Called by disc-art when a cover (or procedural snapshot) is ready. */
+  /**
+   * @param {object} track
+   * @param {string} [coverUrl] https / data / blob source to prefer
+   */
+  function updateMetadata(track, coverUrl) {
+    if (!('mediaSession' in navigator) || !track) return;
+
+    var id = String(track.id);
+    var source = resolveSource(track, coverUrl);
+
+    // Fast path: already materialized for this source
+    if (source && blobUrlByTrack[id] && coverSourceByTrack[id] === source) {
+      applyMetadata(track, [
+        { src: blobUrlByTrack[id], sizes: '512x512', type: 'image/jpeg' },
+        { src: blobUrlByTrack[id], sizes: '256x256', type: 'image/jpeg' },
+      ]);
+      return;
+    }
+
+    if (!source) {
+      applyMetadata(track, logoArtwork);
+      return;
+    }
+
+    // Optimistic: apply source immediately (may work on some devices), then upgrade to blob
+    var mime =
+      source.indexOf('data:image/png') === 0 || /\.png(\?|$)/i.test(source)
+        ? 'image/png'
+        : 'image/jpeg';
+    applyMetadata(track, [
+      { src: source, sizes: '512x512', type: mime },
+      { src: source, sizes: '256x256', type: mime },
+    ]);
+
+    var job = ++artworkJob;
+    materializeArtwork(source)
+      .then(function (blobUrl) {
+        if (job !== artworkJob) {
+          try {
+            URL.revokeObjectURL(blobUrl);
+          } catch (_) {}
+          return;
+        }
+        var cur =
+          window.MPPlayer && MPPlayer.getCurrentTrack && MPPlayer.getCurrentTrack();
+        if (!cur || String(cur.id) !== id) {
+          try {
+            URL.revokeObjectURL(blobUrl);
+          } catch (_) {}
+          return;
+        }
+        revokeBlob(id);
+        blobUrlByTrack[id] = blobUrl;
+        // Song art only — no logo fallback entries
+        applyMetadata(track, [
+          { src: blobUrl, sizes: '512x512', type: 'image/jpeg' },
+          { src: blobUrl, sizes: '256x256', type: 'image/jpeg' },
+        ]);
+      })
+      .catch(function () {
+        /* keep optimistic source or logo already applied */
+      });
+  }
+
   function setArtwork(track, coverUrl) {
     if (!track || !coverUrl) return;
     updateMetadata(track, coverUrl);

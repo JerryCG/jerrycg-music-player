@@ -309,6 +309,11 @@
     MPPlayer.on('play', () => {
       updatePlayPauseUI(true);
       MPMediaSession.updatePlaybackState(true);
+      // Android often binds notification artwork when playback starts
+      try {
+        var t = MPPlayer.getCurrentTrack();
+        if (t) MPMediaSession.updateMetadata(t);
+      } catch (_) {}
     });
     MPPlayer.on('pause', () => {
       updatePlayPauseUI(false);
